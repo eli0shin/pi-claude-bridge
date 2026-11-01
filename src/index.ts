@@ -21,7 +21,7 @@ import { compareHistory, copyRecording, importHistory, LiveRecording, type Recor
 import { deleteSessionState, loadSessionState, saveSessionState } from "./session-store.js";
 import { QueryContext, type AssistantStep } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
-import { claudeCodeSettings, loadConfig, markAskClaudeDeprecationNoticeShown, markStartupNoticeShown, type Config } from "./config.js";
+import { claudeCodeSettings, loadConfig, markAskClaudeDeprecationNoticeShown, type Config } from "./config.js";
 import {
 	collectPromptSkills,
 	projectPromptCapture,
@@ -979,28 +979,6 @@ setTraceNotifier((message) => {
 let piMode: ExtensionContext["mode"] | null = null;
 const activeQueryContexts = sessionRegistry.queries ??= new Set<QueryContext>();
 
-// Defaults that silently cost the user something (no Opus 1M on Max) are
-// announced once. Deferred to the first bridge query rather
-// than session_start: the notice persists a flag to the global config, and
-// firing it on startup would write that file for every pi session that merely
-// has this extension installed. One message, because consecutive info notifies
-// overwrite each other in the TUI.
-let pendingNotices: string[] = [];
-
-function showStartupNoticeOnce(): void {
-	// `hasUI` is true in RPC mode too — it means dialogs are possible, not that a
-	// human is watching. Only a terminal user can act on this.
-	if (pendingNotices.length === 0 || piMode !== "tui") return;
-	const notices = pendingNotices;
-	pendingNotices = [];
-	const path = markStartupNoticeShown();
-	// pi wraps the whole notify string in the theme's dim foreground; the inner reset
-	// drops back to the terminal default rather than dim, which is fine here.
-	const title = `\x1b[33mWelcome to pi-claude-bridge\x1b[39m — settings live in ${path}`;
-	const bullets = [...notices, "This message only appears once. See README.md for more."].map((n) => `• ${n}`);
-	piUI?.notify([title, ...bullets, "─".repeat(64)].join("\n"), "info");
-}
-
 // Captures of what pi assembled per agent; see src/prompt-capture.ts for why this
 // is keyed rather than held in a single slot. One process-wide instance, shared
 // across every extension module instance: isolated subagents re-evaluate this
@@ -1909,7 +1887,6 @@ function dropParkedQuery(c: QueryContext): void {
 /** Provider entry point. Pi calls this for each new prompt and each tool result.
  *  Two cases: tool result delivery (active query) or fresh query. */
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
-	showStartupNoticeOnce();
 	// pi hands providers a transcript (prompt/tools folded into system messages) — fold it
 	// back out to the prompt/tools fields every syncSharedSession call and
 	// prompt-capture lookup below assumes (issue #106).
@@ -2784,10 +2761,6 @@ export default function (pi: ExtensionAPI) {
 	const registeredModels = applyLongContext(MODELS, longContextSettings);
 	if (registeredModels.length === 0) {
 		console.error("claude-bridge: no models available from pi-ai's anthropic catalog — update @earendil-works/pi-ai (requires >=0.86.1)");
-	}
-
-	if (!config.startupNoticeShown && config.provider?.plan === undefined) {
-		pendingNotices.push('Are you using a Max plan? You need to set provider.plan to "max" to unlock 1M context in Opus.');
 	}
 
 	// Pi session lifecycle events: drop rewrite marks and the stream registration

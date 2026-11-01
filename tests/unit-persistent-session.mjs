@@ -150,6 +150,19 @@ afterEach(async () => {
 	__test.setIdleTimeout?.(300_000);
 	__test.setQuery(null);
 });
+it("starts TUI provider turns without welcome notices or notice-related config writes", { timeout: 3000 }, async () => {
+	const notifications = [];
+	const config = join(process.env.PI_CODING_AGENT_DIR, "claude-bridge.json");
+	const before = existsSync(config) ? readFileSync(config, "utf8") : null;
+	for (const fn of handlers.session_start ?? []) fn({}, {
+		cwd: process.cwd(), mode: "tui", ui: { notify: message => notifications.push(message) },
+		sessionManager: { getSessionId: () => "persistent-pi" },
+	});
+	const ask = user("one"), answer = await call([ask]).result();
+	await call([ask, answer, user("two")]).result();
+	assert.deepEqual(notifications, []);
+	assert.equal(existsSync(config) ? readFileSync(config, "utf8") : null, before);
+});
 it("reuses one live SDK process across completed user turns", { timeout: 3000 }, async () => {
 	const first = user("one");
 	const answer = await call([first]).result();

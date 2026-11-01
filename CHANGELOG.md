@@ -2,6 +2,8 @@
 
 ## UNRELEASED
 
+- **Remove: provider welcome notice** — Remove the startup banner, misleading Max-plan reminder, and its notice-related configuration writes.
+
 - **Add: persistent Claude sessions in the Pi fork** — Follow OpenCode's Claude Agent lifecycle: reuse one native process per Pi session across user turns, update model/effort live, drain interruptions, restart on configuration/history changes, and close after five idle minutes or session shutdown; provider turns now exclude inherited Claude settings/hooks/memory and use Pi prompts verbatim. Regression tests exercise real Claude processes against a local API stub, including cancelled-input safety.
 
 - **Breaking: Claude settings files in the repo and project-level `provider` config are ignored (#198)** — Claude Code's project and local settings (`.claude/settings.json`, `.claude/settings.local.json`) are no longer loaded, so a repo's hooks, `apiKeyHelper` and `env` don't run; `~/.claude/settings.json` still applies. A project `.pi/claude-bridge.json` can no longer set `provider` options, which include the Claude Code executable path; set them at user-level in `~/.pi/agent/claude-bridge.json`. Thanks @superninjv.

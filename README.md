@@ -65,7 +65,7 @@ Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config direc
 ```
 
 `askClaude`:
-- `enabled` — register the AskClaude tool (default `false`). If it's unset, the startup notice below points this out once.
+- `enabled` — register the AskClaude tool (default `false`).
 - `name` — override the tool's pi-side name (default `"AskClaude"`)
 - `label` — override the TUI label (default `"Ask Claude Code"`)
 - `description` — override the tool description. Default when `allowFullMode: true`: *"Delegate to Claude Code for a second opinion or analysis (code review, architecture questions, debugging theories), or to autonomously handle a task. Defaults to read-only mode — use full mode when the user wants to delegate a task that requires changes. Prefer to handle straightforward tasks yourself."*
@@ -82,7 +82,7 @@ Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config direc
 - `pathToClaudeCodeExecutable` — override the installed `claude` executable; defaults to `claude` on `PATH`. The provider does not use the SDK's bundled executable.
 
 
-**Notices:** the startup notice points out when `provider.plan` is unset and records `startupNoticeShown` in the global config. There's also a deprecation notice on first use of AskClaude that records its display date as `askClaudeDeprecationShown`.
+**Notices:** there is no provider welcome or plan reminder. The deprecated AskClaude tool still shows a notice on first use and records its display date as `askClaudeDeprecationShown`.
 
 **Extension providers and models.json:** pi's `modelOverrides` in `~/.pi/agent/models.json` do not work correctly with pi-claude-bridge; they only apply to pi-side settings like compaction threshold. Overriding `contextWindow` or other fields requires editing `src/models.ts` directly — to pin a model to 200K, use `provider.forceTwoHundredK` instead.
 
