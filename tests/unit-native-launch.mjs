@@ -26,6 +26,9 @@ for (const file of ["settings.json", "settings.local.json"]) {
 	}));
 }
 const requests = [], launches = [], env = {};
+const children = [];
+let streamingWait;
+let resolveStreamingWait;
 const server = createServer(async (request, response) => {
 	const chunks = [];
 	for await (const chunk of request) chunks.push(chunk);
@@ -37,14 +40,19 @@ const server = createServer(async (request, response) => {
 	requests.push(JSON.stringify(body.messages));
 	const event = (type, fields) => `event: ${type}\ndata: ${JSON.stringify({ type, ...fields })}\n\n`;
 	response.writeHead(200, { "content-type": "text/event-stream" });
-	response.end([
+	const waiting = JSON.stringify(body.messages.findLast(message => message.role === "user")).includes("WAIT_NATIVE");
+	const frames = [
 		event("message_start", { message: { id: `msg_${requests.length}`, type: "message", role: "assistant", model: body.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } } }),
 		event("content_block_start", { index: 0, content_block: { type: "text", text: "" } }),
-		event("content_block_delta", { index: 0, delta: { type: "text_delta", text: "ACK" } }),
+		event("content_block_delta", { index: 0, delta: { type: "text_delta", text: waiting ? "partial native reply" : "ACK" } }),
 		event("content_block_stop", { index: 0 }),
 		event("message_delta", { delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 2 } }),
 		event("message_stop", {}),
-	].join(""));
+	];
+	if (waiting) {
+		response.write(frames.slice(0, 3).join(""));
+		resolveStreamingWait?.();
+	} else response.end(frames.join(""));
 });
 
 before(async () => {
@@ -53,9 +61,23 @@ before(async () => {
 	for (const [key, value] of Object.entries(env)) process.env[key] = value;
 	for (const id of ["pi-native", "pi-ask"]) for (const fn of handlers.session_start) fn({}, { cwd, sessionManager: { getSessionId: () => id } });
 	__test.resetSharedSession();
-	__test.setQuery((params) => { launches.push(params.options); return query(params); });
+	__test.setQuery((params) => {
+		launches.push(params.options);
+		const spawn = params.options.spawnClaudeCodeProcess;
+		return query({ ...params, options: { ...params.options, spawnClaudeCodeProcess: (options) => {
+			const child = spawn(options);
+			children.push(child);
+			return child;
+		} } });
+	});
 });
+async function shutdown(id) {
+	for (const fn of handlers.session_shutdown ?? []) await fn({}, { sessionManager: { getSessionId: () => id } });
+	await new Promise(setImmediate);
+}
 after(async () => {
+	await shutdown("pi-native");
+	await shutdown("pi-ask");
 	__test.setQuery(null);
 	__test.resetSharedSession();
 	for (const key of Object.keys(env)) delete process.env[key];
@@ -78,12 +100,22 @@ it("native Claude Code accepts import, restart fork, prefix-write and AskClaude 
 	assert.equal(launches[0].sessionId, undefined, "row 2 resumes its written import");
 	assert.ok(launches[0].resume);
 	assert.match(requests.at(-1), /first answer/);
+	const warm = await turn([...prior, user("second"), second, user("warm third")]);
+	assert.equal(launches.length, 1, "real SDK must keep the same native process across user turns");
+	assert.equal(children.length, 1);
+	assert.equal(children[0].exitCode, null, "the original native PID remains alive");
+	assert.match(requests.at(-1), /second/);
+	assert.match(requests.at(-1), /warm third/);
+	// Keep the original scenario's history selected below; it also exercises
+	// branching away from a live session after a history edit.
 
 	const saved = __test.getSharedSession("pi-native");
-	assert.deepEqual(saved.digests, digestMessages([...prior, user("second"), second]), "CC's replay acknowledged the prompt");
+	assert.deepEqual(saved.digests, digestMessages([...prior, user("second"), second, user("warm third"), warm]), "CC's replay acknowledged the prompt");
 	assert.equal(saved.dirtyTail, false);
+	await shutdown("pi-native");
+	for (const fn of handlers.session_start) fn({}, { cwd, sessionManager: { getSessionId: () => "pi-native" } });
 	__test.forgetSessionMemory();
-	const third = await turn([...prior, user("second"), second, user("third")]);
+	const third = await turn([...prior, user("second"), second, user("warm third"), warm, user("third")]);
 	assert.equal(launches[1].forkSession, true, "a restart forks the persisted pointer");
 	assert.equal(launches[1].resume, saved.ccSessionId);
 	assert.ok(launches[1].sessionId);
@@ -99,4 +131,53 @@ it("native Claude Code accepts import, restart fork, prefix-write and AskClaude 
 	assert.ok(launches[3].resume);
 	assert.equal(__test.getSharedSession("pi-ask"), null);
 	assert.equal(existsSync(repoHookRan), false, "a hook from the repo's .claude settings ran");
+});
+
+it("a pre-aborted native prompt never launches Claude or reaches HTTP", { timeout: 3000 }, async () => {
+	const controller = new AbortController();
+	controller.abort();
+	const processes = children.length, sent = requests.length;
+	const output = await provider.streamSimple(model, { messages: [user("cancelled before startup")], tools: [] }, { sessionId: "pi-native", signal: controller.signal }).result();
+	assert.equal(output.stopReason, "aborted");
+	assert.equal(children.length, processes);
+	assert.equal(requests.length, sent);
+});
+
+it("native interruption drains then accepts another user turn on the same PID", { timeout: 30_000 }, async () => {
+	await shutdown("pi-native");
+	__test.resetSharedSession();
+	for (const fn of handlers.session_start) fn({}, { cwd, sessionManager: { getSessionId: () => "pi-native" } });
+	const before = children.length;
+	streamingWait = new Promise(resolve => { resolveStreamingWait = resolve; });
+	const controller = new AbortController();
+	const ask = user("WAIT_NATIVE");
+	const active = provider.streamSimple(model, { messages: [ask], tools: [] }, { sessionId: "pi-native", signal: controller.signal, env: { PROVIDER_ENV_PROBE: "1" } });
+	await Promise.race([streamingWait, active.result().then(output => { throw new Error(`Turn ended before the streaming probe: ${JSON.stringify(output)}`); })]);
+	// Wait for Pi's partial stream, not merely the server's socket write.
+	for await (const frame of active) {
+		if (frame.type === "text_delta") { controller.abort(); break; }
+	}
+	const partial = await active.result();
+	assert.equal(partial.stopReason, "aborted");
+	const next = await turn([ask, partial, user("continue after interruption")]);
+	assert.equal(next.stopReason, "stop");
+	assert.equal(children.length, before + 1, "interrupt/resume must not spawn a replacement process");
+	assert.equal(children.at(-1).exitCode, null);
+	resolveStreamingWait = undefined;
+});
+
+it("native idle expiry resumes saved history in a new process", { timeout: 30_000 }, async () => {
+	await shutdown("pi-native");
+	__test.resetSharedSession();
+	for (const fn of handlers.session_start) fn({}, { cwd, sessionManager: { getSessionId: () => "pi-native" } });
+	__test.setIdleTimeout(30);
+	const ask = user("remember this native session");
+	const answer = await turn([ask]);
+	const child = children.at(-1), before = children.length;
+	while (child.exitCode === null && child.signalCode === null) await new Promise(resolve => setTimeout(resolve, 10));
+	__test.setIdleTimeout(300_000);
+	await turn([ask, answer, user("after idle expiry")]);
+	assert.equal(children.length, before + 1);
+	assert.match(requests.at(-1), /remember this native session/);
+	assert.match(requests.at(-1), /after idle expiry/);
 });

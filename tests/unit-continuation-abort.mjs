@@ -50,11 +50,12 @@ const toolResult = (id) => ({ role: "toolResult", toolCallId: id, toolName: "rea
 const tools = [{ name: "read", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } }];
 const settle = () => new Promise((r) => setTimeout(r, 20));
 
-let closes;
+let closes, interrupts;
 beforeEach(() => {
 	resetSharedSession();
 	activeQueryContexts.clear();
 	closes = 0;
+	interrupts = 0;
 	// Parks at a tool call, then, once the result is in, streams text until killed.
 	setQuery(({ prompt, options }) => {
 		let onClose;
@@ -67,7 +68,7 @@ beforeEach(() => {
 			for (const step of textStart) yield step;
 			await killed;
 		})();
-		gen.interrupt = async () => {};
+		gen.interrupt = async () => { interrupts++; };
 		gen.close = () => { closes++; onClose(); };
 		return gen;
 	});
@@ -93,7 +94,8 @@ describe("abort on a run that continues a parked query", () => {
 
 		assert.notEqual(reply, "timeout", "the abort ends the turn");
 		assert.equal(reply.stopReason, "aborted");
-		assert.ok(closes >= 1, "the query is closed");
+		assert.equal(interrupts, 1, "the turn is interrupted");
+		assert.equal(closes, 0, "interruption does not kill a persistent process");
 	});
 
 	it("stops the query when the signal is already aborted", async () => {

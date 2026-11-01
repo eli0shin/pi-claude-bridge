@@ -6,7 +6,7 @@
 //
 // Extracted from index.ts so tests can import without activating the extension.
 
-import type { AssistantMessage, AssistantMessageEventStream, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { AssistantMessage, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { McpResult } from "./extract-tool-results.js";
 import type { PromptStream } from "./prompt-stream.js";
 import { LiveRecording } from "./session-sync.js";
@@ -27,9 +27,30 @@ export interface AssistantStep {
 export class QueryContext {
 	// Query-scoped (fully isolated per query)
 	activeQuery: unknown | null = null;
+	/** A Pi session owns the process, not an individual provider response. */
+	persistent = false;
+	idle = false;
+	interrupted = false;
+	currentPromptUuid: string | undefined;
+	promptAcknowledged = false;
+	configuration = "";
+	idleTimer: ReturnType<typeof setTimeout> | undefined;
+	cancelIdle(): void {
+		clearTimeout(this.idleTimer);
+		this.idleTimer = undefined;
+		this.idle = false;
+	}
+	/** Called only after the SDK reports the whole user turn complete. */
+	completeTurn: (() => void) | null = null;
+	resumeUser: ((model: Model<any>, context: Context, options: SimpleStreamOptions | undefined, stream: AssistantMessageEventStream) => Promise<void>) | null = null;
+	model: Model<any> | undefined;
+	interruptedHistory: string[] | null = null;
+	lastMessages: Context["messages"] = [];
+	closed: Promise<void> = Promise.resolve();
 	currentPiStream: AssistantMessageEventStream | null = null;
 	/** onResponse from the provider call that owns currentPiStream. */
 	currentOnResponse: SimpleStreamOptions["onResponse"] | undefined;
+	currentOnProviderStreamEvent: SimpleStreamOptions["onProviderStreamEvent"] | undefined;
 	/** Latest rate_limit_event not yet reported. CC sends it after message_stop, when a
 	 *  tool call has already ended the stream, so it waits for the next call's stream. */
 	heldRateLimit: RateLimitInfo | undefined;
@@ -116,6 +137,7 @@ export class QueryContext {
 	}
 
 	resetTurnState(model: Model<any>): void {
+		this.model = model;
 		this.turnOutput = {
 			role: "assistant", content: [],
 			api: model.api, provider: model.provider, model: model.id,

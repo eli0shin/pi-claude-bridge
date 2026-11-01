@@ -1,6 +1,6 @@
 # pi-claude-bridge
 
-[![npm version](https://img.shields.io/npm/v/pi-claude-bridge)](https://www.npmjs.com/package/pi-claude-bridge)
+**Persistent-session fork** of [elidickinson/pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge), using [OpenCode's Claude Agent provider](https://github.com/anomalyco/opencode/blob/dev/specs/v2/claude-agent-provider.md) as the runtime behavior spec. Pi remains the harness; Claude stays alive between user turns.
 
 Pi extension that integrates Claude Code via the [Agent SDK](https://github.com/anthropics/claude-agent-sdk-typescript). Originally based on [claude-agent-sdk-pi](https://github.com/prateekmedia/claude-agent-sdk-pi) by Prateek Sunal.
 
@@ -19,18 +19,22 @@ Pi extension that integrates Claude Code via the [Agent SDK](https://github.com/
 
 1. Install the extension:
    ```
-   pi install npm:pi-claude-bridge
+   pi install git:github.com/eli0shin/pi-claude-bridge@persistent-claude-sessions
    ```
 2. Log in to Claude Code with your Claude subscription: run `claude` and type `/login`. The bridge uses Claude Code's login, not pi's `/login`.
 3. In pi, pick a `claude-bridge/...` model with `/model`. (Do not use the `anthropic/...` models)
 
-Requires pi 1.2.0 or newer to use all models (but should mostly work >=0.86.1).
+Remove an existing `npm:pi-claude-bridge` installation first; do not load both copies. Install Claude Code 2.1.248+ on `PATH` (or set `provider.pathToClaudeCodeExecutable`). This fork is tested with Pi 1.4.0 and Claude Code 2.1.316.
 
 ## Provider
 
 Use `/model` to select any Claude model in pi-ai's catalog, e.g. `claude-bridge/claude-fable-5-1`, `claude-bridge/claude-opus-5`, or `claude-bridge/claude-haiku-4-5`.
 
 Behind the scenes, pi's tools are bridged to Claude Code but everything works like normal in pi. Bash commands get Claude Code's 120-second default timeout since pi's bash has none. Skills are forwarded to Claude Code's system prompt, and steering mid-turn reaches Claude at the next tool boundary.
+
+Each Pi session owns one long-running Claude process. Successful replies leave it alive; it stops after five idle minutes and resumes saved history on the next prompt. Tool execution, permission prompts and subagents are **not idle**. Interruptions drain the active turn without killing a healthy process; cancellation before the prompt is acknowledged retires the process so queued input cannot run later. Model and effort changes apply live; changes to tools, forwarded instructions, connection settings or output limits restart it. Session shutdown/reload closes and awaits its processes without closing other Pi sessions' processes.
+
+Claude user/project settings, hooks, native skills, MCP servers, auto-memory and auto-compaction are disabled on the provider path. Pi supplies their equivalents. Claude receives Pi prompts verbatim; instruction changes are not frozen in a saved Claude system-prompt snapshot.
 
 The model list comes from pi-ai's Anthropic catalog automatically — when pi-ai adds a new Claude model, it appears in `/model` after updating the package, no bridge update needed. Dated snapshot ids (e.g. `claude-opus-4-5-20251101`) are not shown.
 
@@ -55,7 +59,6 @@ Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config direc
   "provider": {
     "plan": "max",
     "longContextExtraUsage": false,
-    "strictMcpConfig": true,
     "pathToClaudeCodeExecutable": "/home/you/.nix-profile/bin/claude"
   }
 }
@@ -75,9 +78,8 @@ Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config direc
 - `plan` (default `"pro"`) — set to `"max"` if you have a Max (or Team Premium/Enterprise) Anthropic plan. This enables Opus with 1M context.
 - `longContextExtraUsage` — set to `true` to enable 1M context models even if they cost money through Extra Usage on your plan. It enables Sonnet 4.6 with 1M on every plan and Opus 4.6 with 1M on Pro.
 - `forceTwoHundredK` — array of model ids to pin to 200K context (bare id, no `[1m]` suffix). Use if pi-ai declares a model at 1M but Claude Code won't serve it on your plan.
-- `strictMcpConfig` — block MCP servers from `~/.claude.json` / `.mcp.json` (default `true`). Cloud MCP (Gmail/Drive via claude.ai OAuth) is always blocked.
-- `autoMemoryEnabled` — enable Claude Code's auto-memory system (default `false`)
-- `pathToClaudeCodeExecutable` — path to the `claude` binary. Useful if your OS/filesystem has the SDK's bundled musl/glibc binaries in a place where they can't run. For example, with Nix you can set the binary to e.g. `"/home/you/.nix-profile/bin/claude"`.
+- `strictMcpConfig` and `autoMemoryEnabled` no longer change provider behavior: native Claude MCP configuration and auto-memory are always disabled. The deprecated AskClaude delegation tool retains its separate legacy settings.
+- `pathToClaudeCodeExecutable` — override the installed `claude` executable; defaults to `claude` on `PATH`. The provider does not use the SDK's bundled executable.
 
 
 **Notices:** the startup notice points out when `provider.plan` is unset and records `startupNoticeShown` in the global config. There's also a deprecation notice on first use of AskClaude that records its display date as `askClaudeDeprecationShown`.
@@ -105,7 +107,7 @@ This example sends bridge requests through a proxy and keeps an exported gateway
 
 ## Tests
 
-`npm run test:unit` for offline tests. `npm test` adds integration tests that hit APIs; set `CLAUDE_BRIDGE_TESTING_ALT_MODEL` in `.env.test` for the alt-provider smoke test.
+`npm run test:unit` for offline tests, including real Claude CLI subprocesses against a local HTTP stub. Persistent-session tests verify native process reuse, interruption/drain, idle expiry/resume, startup cancellation, model/effort updates, configuration restarts and session isolation without using your credentials or subscription. `npm test` adds integration tests that hit APIs; set `CLAUDE_BRIDGE_TESTING_ALT_MODEL` in `.env.test` for the alt-provider smoke test.
 
 Integration tests spawn real `pi` and Claude Code subprocesses and need write access to `~/.claude` — a sandbox that blocks it makes `--resume` fail with `No conversation found with session ID`.
 
@@ -139,17 +141,11 @@ To add instructions, use `message`, `context`, or a system-message edit that kee
 
 ### Hooks written for Claude Code
 
-`~/.claude/settings.json` hooks fire inside bridge turns, so a hook injecting Claude-specific guidance duplicates what pi's extensions already provide. A project's `.claude/settings.json` and `.claude/settings.local.json` are not loaded, so a repo's hooks, `apiKeyHelper` and `env` never run. pi sets `PI_CODING_AGENT=true` for child processes, including the Claude Code child; a hook can skip itself on that:
-
-```sh
-[ -n "$PI_CODING_AGENT" ] && exit 0
-```
-
-Hooks do not fire on isolated summary queries.
+User and project Claude settings/hooks do not run in provider turns or isolated summary queries. Port required behavior to Pi extensions. Put gateway/cloud environment configuration in Pi's provider `env` or the launching shell, rather than Claude settings files. Only the deprecated AskClaude delegation tool retains Claude user settings.
 
 ### Compaction and branch summaries
 
-pi runs compaction and branch summaries natively. The bridge routes their `cacheRetention: "none"` calls to isolated Claude Code queries, leaving the live session untouched until pi completes the history rewrite. Other extensions can provide summaries through pi's hooks.
+pi runs compaction and branch summaries natively. The bridge routes their `cacheRetention: "none"` calls to isolated Claude Code queries, leaving the live session untouched until pi completes the history rewrite. Other extensions can provide summaries through pi's hooks. This deliberately differs from OpenCode's cache-sharing summary fork: Pi supplies a complete summary transcript, so its explicit one-shot request is preserved instead of duplicating that transcript inside the live conversation.
 
 ### System prompt rejections
 
@@ -169,16 +165,14 @@ Requires the following in `~/.pi/agent/subagents.json`:
 
 ## Session history
 
-The bridge compares conversation content before each fresh query. Unchanged history resumes the Claude Code session. Tree navigation and history edits retain Claude Code's records up to the last safe matching point, then continue in a new session. Model changes import pi's history into a fresh Claude Code session.
+The bridge compares conversation content before sending a new user turn. Unchanged history reuses the **live process**, not merely its saved session. After idle expiry or process restart, it resumes saved history. Tree navigation and history edits retain Claude Code's records up to the last safe matching point, then continue in a new session. Model/effort changes use SDK controls while the process is live; a model change after process shutdown imports Pi history into a fresh Claude session.
 
-Session pointers, content digests and record IDs are saved under `claude-bridge/sessions/` in pi's agent directory (`PI_CODING_AGENT_DIR`, default `~/.pi/agent`). They let the bridge recover its matching prefix after a restart. Running the same pi session simultaneously in multiple bridge processes is unsupported.
+Session pointers are committed to memory at turn completion and saved only after the child exits, so they never name unflushed native records. Session pointers, content digests and record IDs are saved under `claude-bridge/sessions/` in pi's agent directory (`PI_CODING_AGENT_DIR`, default `~/.pi/agent`). They let the bridge recover its matching prefix after a restart. Running the same pi session simultaneously in multiple bridge processes is unsupported.
 
 ## Known issues
 
 **Edits far back in history can still cost cache.** The unchanged prefix is retained, but Anthropic's cache lookup has a limited lookback. A long rewritten suffix can prevent reuse of an earlier cache entry.
 
 **File snapshots in rewritten history can be lost.** Native records before the matching point keep their attachments. A rewritten suffix carries `@file` expansions, but not snapshots Claude Code recorded after editing files; the tool calls and results remain in pi's history.
-
-**System prompt changes mid-session may not reach the model.** Project context (AGENTS.md/CLAUDE.md), skills, and extension-written instructions are captured on the first request and reused while that prompt recording is retained. Start a new session if updated instructions must take effect immediately.
 
 **Exported Anthropic environment variables override the Claude Code child (issue #107).** An exported `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN` redirects Claude Code to that gateway and every turn fails with its auth error. Unset them for the pi process, or blank them in a `claude-bridge` credential's `env` (see [Configuration](#configuration)).

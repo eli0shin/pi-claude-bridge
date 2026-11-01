@@ -63,7 +63,7 @@ function parkingQuery(steps, after = async function* () {}) {
 			await gate;
 			yield* after();
 		})();
-		gen.interrupt = async () => {};
+		gen.interrupt = async () => { release(); };
 		// Teardown closes the query last, after unregistering it; an abort also
 		// closes it earlier, while it is still registered.
 		gen.close = () => {

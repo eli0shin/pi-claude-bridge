@@ -28,6 +28,9 @@ const sessionsDir = () => join(process.env.PI_CODING_AGENT_DIR, "claude-bridge",
 const persisted = (id = "pi") => loadSessionState(id, assert.fail);
 const stored = (state) => ({ ...state, dirtyTail: true });
 const tick = () => new Promise(setImmediate);
+// Writer-exit tests explicitly shut down the session: user interruption alone
+// now drains a turn and retains its process, as in OpenCode's provider.
+const stopSession = (id = "pi") => Promise.all((handlers.session_shutdown ?? []).map(fn => fn({}, { sessionManager: { getSessionId: () => id } })));
 let scripts, calls;
 
 beforeEach(() => {
@@ -97,7 +100,7 @@ function fakeQuery({ options, prompt }) {
 		}
 		yield { type: "result", subtype: "success", is_error: Boolean(script.error), result: script.error ?? "answer", session_id: id };
 	})();
-	gen.interrupt = async () => {};
+	gen.interrupt = async () => { release(); };
 	gen.close = () => { stopped = true; release(); if (!child.killed) child.kill("SIGTERM"); };
 	return gen;
 }
@@ -238,6 +241,7 @@ it("abort commits contiguous tool progress synchronously and waits for exit befo
 	scripts.push({ tool: true, late: true });
 	const tool = await call([ask], controller.signal).result();
 	controller.abort();
+	void stopSession();
 	const captured = __test.getSharedSession("pi");
 	assert.ok(captured, "onAbort synchronously publishes complete progress");
 	assert.equal(captured.dirtyTail, true);
@@ -261,6 +265,7 @@ it("abort publishes memory at once but saves the pointer only after exit lands i
 	scripts.push({ tool: true, late: true, deferTool: true });
 	const tool = await call([ask], controller.signal).result();
 	controller.abort();
+	void stopSession();
 	const captured = __test.getSharedSession("pi");
 	assert.deepEqual(captured.digests, digestMessages([ask, tool]));
 	const toolUuid = new RegExp(captured.uuids[1]);
@@ -278,8 +283,8 @@ it("a reloaded module shares state and stopping writers, and the old finalizer n
 	scripts.push({ tool: true, hang: true });
 	const tool = await call([ask], controller.signal).result();
 	controller.abort();
+	void stopSession();
 	const committed = __test.getSharedSession("pi");
-	for (const fn of handlers.session_shutdown) fn({}, { sessionManager: { getSessionId: () => "pi" } });
 	const fresh = await import(`../src/index.js?reload=${Date.now()}`);
 	let freshProvider;
 	fresh.default({ on() {}, registerProvider: (_id, value) => { freshProvider = value; }, registerTool() {} });
@@ -332,6 +337,7 @@ it("a synthetic durable-host continuation is grouped with its next assistant, no
 	scripts.push({ tool: true });
 	const tool = await call([ask], controller.signal).result();
 	controller.abort();
+	await stopSession();
 	scripts.push({});
 	const answer = await call([ask, tool, toolResult]).result();
 	const state = __test.getSharedSession("pi");
@@ -531,6 +537,7 @@ it("an abort cancels a fresh query's wait on a stopping writer", { timeout: 5000
 	scripts.push({ tool: true, hang: true });
 	const tool = await call([ask], controller.signal).result();
 	controller.abort();
+	void stopSession();
 	const state = __test.getSharedSession("pi");
 	assert.equal(state.ccSessionId, calls[0].options.sessionId);
 	const next = new AbortController();
